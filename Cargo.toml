@@ -1,0 +1,14 @@
+[package]
+name = "fogping"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+chrono = "0.4.31"
+figment = { version = "0.10.10", features = ["toml"] }
+influxdb = { version = "0.7.1", features = ["derive", "use-serde"] }
+pinger = "0.13.0"
+serde = { version = "1.0.188", features = ["derive"] }
+tokio = { version = "1.32.0", features = ["full"] }

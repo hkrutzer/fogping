@@ -1,12 +1,13 @@
+use std::time::Duration;
 use chrono::{DateTime, Utc};
 use figment::{
     providers::{Format, Toml},
     Figment,
 };
+use log::{debug, warn};
 use influxdb::{Client, InfluxDbWriteable};
 use pinger::{ping_with_interval, PingResult};
 use serde::Deserialize;
-use std::time::Duration;
 
 #[derive(Clone, InfluxDbWriteable)]
 struct PingMeasurement {
@@ -25,15 +26,15 @@ async fn run_ping(host: String, count: u8) -> Vec<PingMeasurement> {
     for _ in 0..count {
         match stream.recv().unwrap() {
             PingResult::Pong(duration, line) => {
-                println!("{:?} (line: {})", duration, line);
+                debug!("{:?} (line: {})", duration, line);
                 results.push(PingMeasurement {
                     time: Utc::now(),
                     duration: duration.as_millis().try_into().unwrap(),
                     host: host.clone(),
                 });
             }
-            PingResult::Timeout(_) => println!("Timeout!"),
-            PingResult::Unknown(line) => println!("Unknown line: {}", line),
+            PingResult::Timeout(_) => warn!("Timeout!"),
+            PingResult::Unknown(line) => warn!("Unknown line: {}", line),
             PingResult::PingExited(_code, _stderr) => {}
         }
     }
@@ -43,15 +44,15 @@ async fn run_ping(host: String, count: u8) -> Vec<PingMeasurement> {
 
 #[derive(Debug, Deserialize)]
 struct Config {
-    #[serde(default = "default_resource")]
+    #[serde(default = "default_ping_count")]
     ping_count: u8,
-    ping_host: Vec<String>,
+    ping_targets: Vec<String>,
 
     // InfluxDB parameters
     influxdb: InfluxDB,
 }
 
-fn default_resource() -> u8 {
+fn default_ping_count() -> u8 {
     10
 }
 
@@ -64,12 +65,14 @@ struct InfluxDB {
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
+
     let conf: Config = Figment::new()
         .merge(Toml::file("./config.toml"))
         .extract()
         .unwrap();
 
-    let hosts = conf.ping_host;
+    let hosts = conf.ping_targets;
     let mut client = Client::new(conf.influxdb.host, conf.influxdb.db);
 
     if let Some(token) = conf.influxdb.token {

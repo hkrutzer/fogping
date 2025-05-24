@@ -70,7 +70,7 @@ async fn main() {
     let conf: Config = Figment::new()
         .merge(Toml::file("./config.toml"))
         .extract()
-        .unwrap();
+        .expect("Failed to load configuration");
 
     let hosts = conf.ping_targets;
     let mut client = Client::new(conf.influxdb.host, conf.influxdb.db);

@@ -1,45 +1,53 @@
-use std::time::Duration;
-use chrono::{DateTime, Utc};
 use figment::{
     providers::{Format, Toml},
     Figment,
 };
-use log::{debug, warn};
-use influxdb::{Client, InfluxDbWriteable};
+use log::{debug, error, info, warn};
 use pinger::{ping_with_interval, PingResult};
 use serde::Deserialize;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 
-#[derive(Clone, InfluxDbWriteable)]
-struct PingMeasurement {
-    time: DateTime<Utc>,
-    duration: i32,
-    #[influxdb(tag)]
+mod store;
+use crate::store::Store;
+
+#[derive(Debug)]
+struct Measurement {
+    time: u128,
+    duration: Duration,
     host: String,
 }
 
-async fn run_ping(host: String, count: u8) -> Vec<PingMeasurement> {
-    let mut results = Vec::<PingMeasurement>::with_capacity(count.into());
-
+async fn run_ping(host: String, count: u8, tx: mpsc::Sender<Measurement>) {
     let stream =
         ping_with_interval(host.clone(), Duration::from_millis(300), None).expect("error pinging");
 
-    for _ in 0..count {
-        match stream.recv().unwrap() {
+    for message in stream.into_iter().take(count as usize) {
+        match message {
             PingResult::Pong(duration, line) => {
-                debug!("{:?} (line: {})", duration, line);
-                results.push(PingMeasurement {
-                    time: Utc::now(),
-                    duration: duration.as_millis().try_into().unwrap(),
+                let time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+
+                tx.send(Measurement {
                     host: host.clone(),
-                });
+                    time,
+                    duration,
+                })
+                .await
+                .expect("Failed to send measurement");
+
+                debug!("Ping duration: {:?} (line: {})", duration, line);
             }
-            PingResult::Timeout(_) => warn!("Timeout!"),
-            PingResult::Unknown(line) => warn!("Unknown line: {}", line),
-            PingResult::PingExited(_code, _stderr) => {}
+            PingResult::Timeout(_) => warn!("Ping timeout"),
+            PingResult::Unknown(line) => error!("Unknown line: {}", line),
+            PingResult::PingExited(code, stderr) => {
+                error!("Ping exited with code {}: {}", code, stderr);
+            }
         }
     }
-
-    results
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,33 +73,49 @@ struct InfluxDB {
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "./config.toml".to_string());
 
     let conf: Config = Figment::new()
-        .merge(Toml::file("./config.toml"))
+        .merge(Toml::file(&config_path))
         .extract()
         .expect("Failed to load configuration");
 
+    let mut client = store::influxdb::InfluxDBStore::new(conf.influxdb);
+
     let hosts = conf.ping_targets;
-    let mut client = Client::new(conf.influxdb.host, conf.influxdb.db);
 
-    if let Some(token) = conf.influxdb.token {
-        client = client.with_token(token)
-    }
+    let (tx, mut rx) = mpsc::channel::<Measurement>(33);
 
-    let mut tasks = Vec::with_capacity(hosts.len());
-    for host in hosts {
-        tasks.push(tokio::spawn(run_ping(host, conf.ping_count)));
-    }
+    info!(
+        "Starting pings for {} hosts with {} pings each",
+        hosts.len(),
+        conf.ping_count
+    );
 
-    for task in tasks {
-        let results: Vec<influxdb::WriteQuery> = task
-            .await
-            .unwrap()
-            .iter()
-            .map(|x| x.clone().into_query("ping_measurement"))
-            .collect();
-        let write_result = client.query(results).await;
-        assert!(write_result.is_ok(), "Influx write result was not okay");
-    }
+    // Spawn a task to handle storing measurements
+    let store_task = tokio::spawn(async move {
+        while let Some(measurement) = rx.recv().await {
+            if let Err(e) = client.add_measurement(measurement).await {
+                error!("Failed to add measurement: {}", e);
+            }
+        }
+
+        // Flush when channel is closed
+        if let Err(e) = client.flush().await {
+            error!("Failed to flush: {}", e);
+        }
+    });
+
+    let tasks: Vec<_> = hosts
+        .into_iter()
+        .map(|item| tokio::spawn(run_ping(item, conf.ping_count, tx.clone())))
+        .collect();
+    let _ = futures::future::join_all(tasks).await;
+    drop(tx);
+
+    store_task.await.unwrap();
 }

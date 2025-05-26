@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-chrono = "0.4.31"
 env_logger = "0.11.7"
 figment = { version = "0.10.10", features = ["toml"] }
-influxdb = { version = "0.7.1", features = ["derive", "use-serde"] }
+futures = "0.3.31"
+hostname = "0.4.1"
+influxdb = { version = "0.7.1" }
 log = "0.4.26"
 pinger = "0.13.0"
 serde = { version = "1.0.188", features = ["derive"] }

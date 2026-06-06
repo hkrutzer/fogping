@@ -9,7 +9,8 @@ pub struct InfluxDBStore {
 impl Store for InfluxDBStore {
     async fn add_measurement(&mut self, data: Measurement) -> Result<(), String> {
         let query = Timestamp::Nanoseconds(data.time)
-            .into_query("ping_measurement")
+            .try_into_query("ping_measurement")
+            .map_err(|e| format!("Failed to create InfluxDB query: {}", e))?
             .add_field("duration", data.duration.as_millis() as u64)
             .add_tag("target", data.host)
             .add_tag(
